@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>HelloApi</AssemblyName>
+    <RootNamespace>HelloApi</RootNamespace>
+    <!-- Publish as a self-contained-friendly, trimmed-ready app -->
+    <PublishSingleFile>false</PublishSingleFile>
+  </PropertyGroup>
+
+</Project>

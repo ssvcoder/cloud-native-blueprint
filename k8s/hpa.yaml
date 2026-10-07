@@ -1,0 +1,32 @@
+# Scales hello-api between 3 and 10 replicas to keep average CPU
+# utilization near 70%. Requires the metrics-server in the cluster
+# (AKS ships it by default).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hello-api
+  namespace: blueprint
+  labels:
+    app.kubernetes.io/name: hello-api
+    app.kubernetes.io/part-of: cloud-native-blueprint
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: hello-api
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60

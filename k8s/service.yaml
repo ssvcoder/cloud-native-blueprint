@@ -1,0 +1,19 @@
+# Internal ClusterIP Service — the API is only reachable inside the cluster
+# (or through the Ingress). No public LoadBalancer is exposed directly.
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-api
+  namespace: blueprint
+  labels:
+    app.kubernetes.io/name: hello-api
+    app.kubernetes.io/part-of: cloud-native-blueprint
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: hello-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

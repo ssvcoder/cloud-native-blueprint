@@ -1,0 +1,15 @@
+# Non-sensitive configuration for the hello-api microservice.
+# Values are read by the app via ASP.NET Core configuration binding
+# (environment variables with the APP_ prefix).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hello-api-config
+  namespace: blueprint
+  labels:
+    app.kubernetes.io/name: hello-api
+    app.kubernetes.io/part-of: cloud-native-blueprint
+data:
+  APP_GREETING: "Hello from the Cloud-Native Blueprint!"
+  APP_VERSION: "1.0.0"
+  # ASPNETCORE_URLS is set in the Deployment; kept here for visibility.

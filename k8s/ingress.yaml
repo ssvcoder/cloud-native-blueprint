@@ -1,0 +1,32 @@
+# Routes external traffic to the hello-api Service.
+#
+# Prerequisites:
+#   1. Install the NGINX Ingress Controller in the cluster, e.g.:
+#        helm upgrade --install ingress-nginx ingress-nginx \
+#          --repo https://kubernetes.github.io/ingress-nginx \
+#          --namespace ingress-nginx --create-namespace
+#   2. Point DNS (or /etc/hosts for a demo) at the controller's external IP:
+#        hello.blueprint.local -> <ingress-controller-external-ip>
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hello-api
+  namespace: blueprint
+  labels:
+    app.kubernetes.io/name: hello-api
+    app.kubernetes.io/part-of: cloud-native-blueprint
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: hello.blueprint.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hello-api
+                port:
+                  number: 80
