@@ -1,0 +1,173 @@
+# ---------------------------------------------------------------------------
+# REFERENCE COPY of the CI/CD workflow.
+# GitHub does not allow apps to write to .github/workflows/ directly.
+# To activate this pipeline, copy this file to .github/workflows/ci-cd.yml
+# (via the GitHub web UI: Add file -> Create new file).
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Cloud-Native Blueprint CI/CD
+#
+# Flow:
+#   pull_request      -> build + test the app, `terraform plan` (no changes)
+#   push to main      -> build + test, push image to ACR,
+#                        `terraform apply`, deploy manifests to AKS
+#
+# Environment protection (configure in GitHub: Settings > Environments):
+#   - Create an environment named "production".
+#   - Add required reviewers so `terraform apply` and the AKS deploy pause
+#     for human approval before touching live infrastructure.
+#   - Store secrets at the environment level (not repo level) so PRs from
+#     forks cannot read them.
+#
+# Required secrets (environment: production):
+#   AZURE_CREDENTIALS   - Service principal JSON for azure/login
+#                         { "clientId": "...", "clientSecret": "...",
+#                           "subscriptionId": "...", "tenantId": "..." }
+#   ARM_CLIENT_ID / ARM_CLIENT_SECRET / ARM_SUBSCRIPTION_ID / ARM_TENANT_ID
+#                       - Same SP values as individual vars for the
+#                         Terraform azurerm provider (can reuse the JSON fields)
+#   ACR_NAME            - e.g. acrblueprintdev (short name, no .azurecr.io)
+#   RESOURCE_GROUP      - e.g. rg-blueprint-dev
+#   AKS_CLUSTER         - e.g. aks-blueprint-dev
+# ---------------------------------------------------------------------------
+
+name: ci-cd
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  DOTNET_VERSION: "8.0.x"
+  APP_DIR: k8s/app
+  TF_DIR: infra/terraform
+  IMAGE_NAME: hello-api
+
+jobs:
+  # -- Build & test the .NET app on every PR and every push -----------------
+  build-test:
+    name: Build & test (.NET)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        working-directory: ${{ env.APP_DIR }}
+        run: dotnet restore
+
+      - name: Build
+        working-directory: ${{ env.APP_DIR }}
+        run: dotnet build --no-restore -c Release
+
+      # Publishes to catch packaging errors (missing files, bad Dockerfile
+      # COPY paths) before the Docker build runs.
+      - name: Publish check
+        working-directory: ${{ env.APP_DIR }}
+        run: dotnet publish -c Release -o /tmp/publish --no-build
+
+  # -- Terraform plan on PRs: show the diff, change nothing ------------------
+  terraform-plan:
+    name: Terraform plan
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    defaults:
+      run:
+        working-directory: ${{ env.TF_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+
+      - name: Terraform init
+        run: terraform init -input=false
+        env:
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+
+      - name: Terraform validate & plan
+        run: |
+          terraform validate
+          terraform plan -input=false -out=tfplan
+        env:
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+
+  # -- Full deploy on push to main (gated by the "production" environment) ----
+  deploy:
+    name: Build image, apply infra, deploy to AKS
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build-test]
+    environment: production # <-- required reviewers pause here (see header)
+    env:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # -- Docker: build & push the app image to ACR -------------------------
+      - name: Log in to ACR
+        run: az acr login --name ${{ secrets.ACR_NAME }}
+
+      - name: Build and push image
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          IMAGE_TAG="${GITHUB_SHA::7}"
+          ACR_LOGIN_SERVER="${{ secrets.ACR_NAME }}.azurecr.io"
+          docker build -t "$ACR_LOGIN_SERVER/${{ env.IMAGE_NAME }}:$IMAGE_TAG" .
+          docker push "$ACR_LOGIN_SERVER/${{ env.IMAGE_NAME }}:$IMAGE_TAG"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+          echo "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" >> "$GITHUB_ENV"
+
+      # -- Terraform: apply infrastructure changes ----------------------------
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+
+      - name: Terraform init & apply
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init -input=false
+          terraform apply -input=false -auto-approve
+
+      # -- Kubernetes: render + apply manifests -------------------------------
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ secrets.RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER }}
+
+      - name: Deploy manifests to AKS
+        run: |
+          # envsubst fills ${ACR_LOGIN_SERVER} / ${IMAGE_TAG} in deployment.yaml
+          # so the cluster runs the exact image built above.
+          export ACR_LOGIN_SERVER IMAGE_TAG
+          for f in k8s/namespace.yaml k8s/configmap.yaml k8s/secret-template.yaml \
+                   k8s/deployment.yaml k8s/service.yaml k8s/ingress.yaml k8s/hpa.yaml; do
+            envsubst < "$f" | kubectl apply -f -
+          done
+          kubectl -n blueprint rollout status deployment/hello-api --timeout=180s
+          kubectl -n blueprint get pods -o wide
